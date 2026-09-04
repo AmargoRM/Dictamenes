@@ -11,8 +11,11 @@ Plugin de QGIS para generar dictámenes de cuerpo de agua (Dirección de Agua, C
 - Soporte para múltiples fuentes dictaminadas por expediente
 - **Guardar/Cargar formulario como JSON** para retomar dictámenes en progreso
 - **Subir imagen por fuente**: se inserta automáticamente en "Figura 2. Cuerpo de agua en análisis"
-- **Mapa de referencia automático** (Figura 1): fondo Google Híbrido, cuadrícula CRTM05 con marcas externas, escala automática, media página
-- Captura de coordenadas sin decimales (números enteros)
+- **Mapa de referencia automático** (Figura 1): fondo Google Híbrido, red hídrica de contexto, cuadrícula CRTM05 con marcas externas, escala automática, media página
+- Simbología por tipo: nacientes/puntuales círculo azul; ríos/quebradas cruz (inicio verde, final verde oscuro); etiqueta a la izquierda
+- Captura de coordenadas sin decimales (números enteros), con marcado en vivo sobre el mapa
+- Botón para generar una capa temporal de puntos con nombre, tipo y número
+- Capa de red hídrica simplificada incluida (`Red.hidrica.min.geojson`)
 
 ## Instalación
 

@@ -252,7 +252,7 @@ class SourceCard(QGroupBox):
         root.addWidget(self.observaciones)
 
         # Imagen del cuerpo de agua (Figura 2), se inserta en el Word por fuente.
-        img_box = QGroupBox("Imagen del cuerpo de agua (Figura 2)")
+        img_box = QGroupBox("Imagen del cuerpo de agua")
         img_layout = QVBoxLayout(img_box)
         img_layout.setContentsMargins(8, 8, 8, 8)
         img_buttons = QHBoxLayout()
@@ -548,6 +548,7 @@ class DictamenesDADockWidget(QDockWidget):
         self.last_snapshot_repr = ""
         self.last_analyzed_data = None
         self._restore_source_data = {}
+        self._capture_layer_id = None
         self._build_ui()
 
     def _build_ui(self):
@@ -637,12 +638,14 @@ class DictamenesDADockWidget(QDockWidget):
         self.btn_clear = QPushButton("Limpiar")
         self.btn_save_form = QPushButton("Guardar formulario")
         self.btn_load_form = QPushButton("Cargar formulario")
+        self.btn_points_layer = QPushButton("Generar capa de puntos")
         actions.addWidget(self.btn_load_layers, 0, 0)
         actions.addWidget(self.btn_analyze, 0, 1)
         actions.addWidget(self.btn_generate, 1, 0)
         actions.addWidget(self.btn_clear, 1, 1)
         actions.addWidget(self.btn_save_form, 2, 0)
         actions.addWidget(self.btn_load_form, 2, 1)
+        actions.addWidget(self.btn_points_layer, 3, 0, 1, 2)
         layout.addLayout(actions)
 
         self.messages = QTextEdit()
@@ -668,6 +671,7 @@ class DictamenesDADockWidget(QDockWidget):
         self.btn_clear.clicked.connect(self.clear_form)
         self.btn_save_form.clicked.connect(self.save_form)
         self.btn_load_form.clicked.connect(self.load_form)
+        self.btn_points_layer.clicked.connect(self.generate_points_layer)
         self._render_sources(1)
 
     def _render_sources(self, count):
@@ -746,6 +750,7 @@ class DictamenesDADockWidget(QDockWidget):
             decimals = 6 if self.input_crs.currentData() == "EPSG:4326" else 0
             x_widget.setText(f"{point.x():.{decimals}f}")
             y_widget.setText(f"{point.y():.{decimals}f}")
+            self._add_capture_marker(point, self.input_crs.currentData(), label)
             self._message(f"Coordenada capturada para {label}: {point.x():.{decimals}f}, {point.y():.{decimals}f}")
         except Exception as exc:
             self._message("Error al capturar coordenada: " + str(exc))
@@ -821,6 +826,46 @@ class DictamenesDADockWidget(QDockWidget):
             if src.get("warning"):
                 lines.append("Advertencia: " + src["warning"])
         self._message("\n".join(lines))
+
+    def _ensure_capture_layer(self):
+        project = QgsProject.instance()
+        layer = project.mapLayer(self._capture_layer_id) if self._capture_layer_id else None
+        if layer is None:
+            from .map_builder import make_capture_layer
+            layer = make_capture_layer()
+            project.addMapLayer(layer)
+            self._capture_layer_id = layer.id()
+        return layer
+
+    def _add_capture_marker(self, point, input_auth, label):
+        try:
+            from qgis.core import QgsFeature, QgsGeometry
+            crtm = self.layer_manager.to_crtm(point.x(), point.y(), input_auth)
+            layer = self._ensure_capture_layer()
+            feat = QgsFeature(layer.fields())
+            feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(crtm.x(), crtm.y())))
+            feat.setAttributes([label])
+            layer.dataProvider().addFeatures([feat])
+            layer.updateExtents()
+            layer.triggerRepaint()
+        except Exception as exc:
+            self._message("No se pudo marcar la captura en el mapa: " + str(exc))
+
+    def generate_points_layer(self):
+        snapshot = self.collect_snapshot()
+        try:
+            from .map_builder import collect_map_points, make_points_layer
+            pts = collect_map_points(snapshot)
+            if not pts:
+                QMessageBox.information(self, "Dictámenes-DA",
+                                        "No hay puntos con coordenadas para generar la capa.")
+                return
+            layer = make_points_layer(pts, name="Puntos dictamen (temporal)")
+            QgsProject.instance().addMapLayer(layer)
+            self._message(f"Capa temporal generada con {len(pts)} punto(s): 'Puntos dictamen (temporal)'.")
+        except Exception as exc:
+            self._message("Error al generar la capa de puntos: " + str(exc))
+            self._message(traceback.format_exc())
 
     def _build_reference_map(self, snapshot) -> str:
         """Genera el PNG del mapa de referencia en el hilo principal. Devuelve la ruta o ''."""
