@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#1c2a24"/>
+  <path d="M12 44c10-18 18-26 26-24 6 2 7 9 14 10" fill="none" stroke="#f1ede2" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="38" cy="20" r="5" fill="#2f9d7e"/>
+  <path d="M17 47h30" stroke="#f1ede2" stroke-width="4" stroke-linecap="round"/>
+  <text x="32" y="58" text-anchor="middle" font-family="Arial" font-size="9" fill="#f1ede2">DA</text>
+</svg>

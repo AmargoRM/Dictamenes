@@ -1,0 +1,12 @@
+[general]
+name=Dictámenes-DA
+description=Generador de dictámenes de cuerpo de agua para QGIS, adaptado desde el HTML de Dirección de Agua con captura directa de puntos en el mapa.
+version=0.3.0
+qgisMinimumVersion=3.22
+author=Esteban Rojas
+email=
+about=Formulario nativo de QGIS para ingresar datos administrativos, fuentes dictaminadas, coordenadas Inicio/Final y puntos de control, con captura por clic en el mapa, análisis espacial con capas GeoJSON integradas y generación de DOCX sobre el machote original.
+category=Vector
+icon=icon.svg
+experimental=True
+deprecated=False
