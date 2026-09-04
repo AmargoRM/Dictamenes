@@ -481,29 +481,6 @@ def build_data_from_snapshot(snapshot: dict, layer_manager: EmbeddedLayerManager
     return data
 
 
-class AnalysisTask(QgsTask):
-    def __init__(self, widget, plugin_dir: str, snapshot: dict):
-        super().__init__("Dictámenes-DA: análisis espacial", QgsTask.CanCancel)
-        self.widget = widget
-        self.plugin_dir = plugin_dir
-        self.snapshot = snapshot
-        self.result_data = None
-        self.error_text = ""
-
-    def run(self):
-        try:
-            manager = EmbeddedLayerManager(self.plugin_dir)
-            self.result_data = build_data_from_snapshot(self.snapshot, manager, do_spatial=True)
-            return True
-        except Exception:
-            self.error_text = traceback.format_exc()
-            return False
-
-    def finished(self, ok):
-        if self.widget:
-            self.widget._analysis_finished(self, ok)
-
-
 class GenerateTask(QgsTask):
     def __init__(self, widget, plugin_dir: str, snapshot: dict, directory: str, analyzed_data=None, mapa_png="", norm_images=None):
         super().__init__("Dictámenes-DA: generar Word", QgsTask.CanCancel)
@@ -519,18 +496,23 @@ class GenerateTask(QgsTask):
 
     def run(self):
         try:
+            self.setProgress(5)
             if self.analyzed_data:
                 data = self.analyzed_data
             else:
                 manager = EmbeddedLayerManager(self.plugin_dir)
+                self.setProgress(15)
                 data = build_data_from_snapshot(self.snapshot, manager, do_spatial=True)
+            self.setProgress(75)
             if self.mapa_png:
                 data["mapa_png"] = self.mapa_png
             # Aplica las fotos reorientadas (por si se usó el análisis en caché).
             for i, path in enumerate(self.norm_images):
                 if path and i < len(data.get("sources", [])):
                     data["sources"][i]["imagen_path"] = path
+            self.setProgress(85)
             self.output_path = write_docx(data, self.directory, self.plugin_dir)
+            self.setProgress(100)
             return True
         except Exception:
             self.error_text = traceback.format_exc()
@@ -641,33 +623,44 @@ class DictamenesDADockWidget(QDockWidget):
         maplayers = QGroupBox("Capas extra para el mapa")
         ml = QVBoxLayout(maplayers)
         ml.setContentsMargins(8, 8, 8, 8)
-        ml.addWidget(QLabel("Marque las capas del proyecto que quiere incluir en el mapa:"))
+        ml.addWidget(QLabel("Marque las capas a incluir en el mapa. Por defecto se listan las visibles en el proyecto; use el buscador para otras."))
+        self.layer_search = QLineEdit()
+        self.layer_search.setPlaceholderText("Buscar capa por nombre…")
+        ml.addWidget(self.layer_search)
         self.extra_layers_list = QListWidget()
         self.extra_layers_list.setMinimumHeight(90)
         ml.addWidget(self.extra_layers_list)
         ml_btns = QHBoxLayout()
-        self.btn_refresh_layers = QPushButton("Refrescar capas")
+        self.btn_refresh_layers = QPushButton("Refrescar")
         self.btn_edit_symbology = QPushButton("Editar simbología/etiquetas…")
         ml_btns.addWidget(self.btn_refresh_layers)
         ml_btns.addWidget(self.btn_edit_symbology)
         ml.addLayout(ml_btns)
+
+        # Control de la leyenda del mapa.
+        from qgis.PyQt.QtWidgets import QCheckBox
+        self.chk_legend = QCheckBox("Mostrar leyenda en el mapa")
+        self.chk_legend.setChecked(True)
+        self.chk_legend_points = QCheckBox("Incluir puntos de interés")
+        self.chk_legend_points.setChecked(True)
+        self.chk_legend_river = QCheckBox("Incluir red hídrica")
+        self.chk_legend_river.setChecked(True)
+        ml.addWidget(self.chk_legend)
+        ml.addWidget(self.chk_legend_points)
+        ml.addWidget(self.chk_legend_river)
         layout.addWidget(maplayers)
 
         actions = QGridLayout()
-        self.btn_load_layers = QPushButton("Cargar capas")
-        self.btn_analyze = QPushButton("Analizar")
         self.btn_generate = QPushButton("Generar Word")
         self.btn_clear = QPushButton("Limpiar")
         self.btn_save_form = QPushButton("Guardar formulario")
         self.btn_load_form = QPushButton("Cargar formulario")
         self.btn_points_layer = QPushButton("Generar capa de puntos")
-        actions.addWidget(self.btn_load_layers, 0, 0)
-        actions.addWidget(self.btn_analyze, 0, 1)
-        actions.addWidget(self.btn_generate, 1, 0)
-        actions.addWidget(self.btn_clear, 1, 1)
-        actions.addWidget(self.btn_save_form, 2, 0)
-        actions.addWidget(self.btn_load_form, 2, 1)
-        actions.addWidget(self.btn_points_layer, 3, 0, 1, 2)
+        actions.addWidget(self.btn_generate, 0, 0)
+        actions.addWidget(self.btn_clear, 0, 1)
+        actions.addWidget(self.btn_save_form, 1, 0)
+        actions.addWidget(self.btn_load_form, 1, 1)
+        actions.addWidget(self.btn_points_layer, 2, 0, 1, 2)
         layout.addLayout(actions)
 
         self.messages = QTextEdit()
@@ -687,8 +680,6 @@ class DictamenesDADockWidget(QDockWidget):
         self.btn_add_control.clicked.connect(self._add_control_row)
         self.btn_capture_control.clicked.connect(self._capture_control_selected)
         self.btn_remove_control.clicked.connect(self._remove_control_selected)
-        self.btn_load_layers.clicked.connect(self._load_layers)
-        self.btn_analyze.clicked.connect(self.analyze)
         self.btn_generate.clicked.connect(self.generate_docx)
         self.btn_clear.clicked.connect(self.clear_form)
         self.btn_save_form.clicked.connect(self.save_form)
@@ -696,6 +687,7 @@ class DictamenesDADockWidget(QDockWidget):
         self.btn_points_layer.clicked.connect(self.generate_points_layer)
         self.btn_refresh_layers.clicked.connect(self._refresh_layer_list)
         self.btn_edit_symbology.clicked.connect(self._edit_layer_symbology)
+        self.layer_search.textChanged.connect(self._refresh_layer_list)
         self._render_sources(1)
         self._refresh_layer_list()
 
@@ -821,37 +813,6 @@ class DictamenesDADockWidget(QDockWidget):
             ],
         }
 
-    def analyze(self):
-        snapshot = self.collect_snapshot()
-        self.last_snapshot_repr = repr(snapshot)
-        self.last_analyzed_data = None
-        task = AnalysisTask(self, self.plugin_dir, snapshot)
-        self.active_tasks.append(task)
-        self.btn_analyze.setEnabled(False)
-        self._message("Análisis enviado a segundo plano. Puede seguir usando QGIS mientras termina.")
-        QgsApplication.taskManager().addTask(task)
-
-    def _analysis_finished(self, task, ok):
-        self.btn_analyze.setEnabled(True)
-        if task in self.active_tasks:
-            self.active_tasks.remove(task)
-        if not ok:
-            self._message("Error en análisis espacial:\n" + task.error_text)
-            return
-        data = task.result_data
-        self.last_analyzed_data = data
-        lines = [f"Análisis espacial completado. Cuadro 1: {len(data['field_points'])} punto(s). Fuente(s): {len(data['sources'])}."]
-        for src in data["sources"]:
-            lines.append(
-                f"Fuente {src.get('numero_fuente')}: {src.get('provincia','')}, "
-                f"{src.get('canton','')}, {src.get('distrito','')} | "
-                f"Cuenca {src.get('cuenca_numero','')} {src.get('cuenca_nombre','')} | "
-                f"Hoja {src.get('hoja_cartografica','')} | Suelo {src.get('orden_suelo','')}"
-            )
-            if src.get("warning"):
-                lines.append("Advertencia: " + src["warning"])
-        self._message("\n".join(lines))
-
     def _ensure_capture_layer(self):
         project = QgsProject.instance()
         layer = project.mapLayer(self._capture_layer_id) if self._capture_layer_id else None
@@ -894,13 +855,37 @@ class DictamenesDADockWidget(QDockWidget):
 
     def _refresh_layer_list(self):
         previously = set(self._selected_extra_layer_ids())
+        search = self.layer_search.text().strip().lower() if hasattr(self, "layer_search") else ""
+        project = QgsProject.instance()
+        tree = project.layerTreeRoot()
         self.extra_layers_list.clear()
-        for lyr in QgsProject.instance().mapLayers().values():
-            item = QListWidgetItem(lyr.name())
+        for lyr in project.mapLayers().values():
+            name = lyr.name()
+            if search:
+                # Con búsqueda: cualquier capa cuyo nombre contenga el texto.
+                if search not in name.lower():
+                    continue
+            else:
+                # Sin búsqueda: solo capas visibles (marcadas) en el proyecto.
+                node = tree.findLayer(lyr.id())
+                try:
+                    visible = node.isVisible() if node else False
+                except Exception:
+                    visible = True
+                if not visible:
+                    continue
+            item = QListWidgetItem(name)
             item.setData(Qt.UserRole, lyr.id())
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked if lyr.id() in previously else Qt.Unchecked)
             self.extra_layers_list.addItem(item)
+
+    def _legend_options(self):
+        return {
+            "show": self.chk_legend.isChecked() if hasattr(self, "chk_legend") else True,
+            "points": self.chk_legend_points.isChecked() if hasattr(self, "chk_legend_points") else True,
+            "river": self.chk_legend_river.isChecked() if hasattr(self, "chk_legend_river") else True,
+        }
 
     def _selected_extra_layer_ids(self):
         ids = []
@@ -978,7 +963,8 @@ class DictamenesDADockWidget(QDockWidget):
         QApplication.processEvents()
         try:
             extra = self._selected_extra_layer_ids()
-            build_reference_map(self.iface, self.plugin_dir, snapshot, mapa_png, extra_layer_ids=extra)
+            build_reference_map(self.iface, self.plugin_dir, snapshot, mapa_png,
+                                extra_layer_ids=extra, legend_opts=self._legend_options())
             self._message("Mapa de referencia generado.")
             return mapa_png
         except Exception as exc:

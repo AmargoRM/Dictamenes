@@ -309,7 +309,7 @@ def _round_scale_up(scale: float) -> float:
 
 
 def build_reference_map(iface, plugin_dir: str, snapshot: dict, out_png_path: str,
-                        extra_layer_ids=None) -> str:
+                        extra_layer_ids=None, legend_opts=None) -> str:
     points = collect_map_points(snapshot)
     if not points:
         raise ValueError("No hay coordenadas para dibujar el mapa.")
@@ -365,7 +365,16 @@ def build_reference_map(iface, plugin_dir: str, snapshot: dict, out_png_path: st
         _configure_grid(map_item, map_item.extent())
         _add_scalebar(layout, map_item)
         _add_north(layout)
-        _add_legend(layout, map_item)
+
+        opts = legend_opts or {"show": True, "points": True, "river": True}
+        include = []
+        if opts.get("points", True):
+            include.append(pts_layer)
+        include.extend(extra_layers)
+        if river is not None and opts.get("river", True):
+            include.append(river)
+        if opts.get("show", True) and include:
+            _add_legend(layout, map_item, include)
 
         exporter = QgsLayoutExporter(layout)
         settings = QgsLayoutExporter.ImageExportSettings()
@@ -379,31 +388,54 @@ def build_reference_map(iface, plugin_dir: str, snapshot: dict, out_png_path: st
             project.removeMapLayer(lid)
 
 
-def _add_legend(layout, map_item):
-    """Pequeña leyenda con la simbología de las capas activas del mapa."""
+def _add_legend(layout, map_item, include_layers):
+    """Leyenda pequeña, solo con las capas indicadas y filtrada por lo visible en la vista.
+
+    Se ubica en la esquina inferior derecha del mapa, con fondo blanco y fuente
+    chica, para no tapar los puntos de interés (que quedan centrados).
+    """
     try:
-        from qgis.core import QgsLayoutItemLegend, QgsLegendStyle
+        from qgis.core import QgsLayoutItemLegend, QgsLegendStyle, QgsLayoutItem
         legend = QgsLayoutItemLegend(layout)
         legend.setLinkedMap(map_item)
         legend.setTitle("Simbología")
+        # Modelo manual: solo las capas elegidas (no todas las del proyecto).
         try:
-            legend.setAutoUpdateModel(True)
+            legend.setAutoUpdateModel(False)
+            root = legend.model().rootGroup()
+            for child in list(root.children()):
+                root.removeChildNode(child)
+            for lyr in include_layers:
+                root.addLayer(lyr)
+            legend.updateLegend()
+        except Exception:
+            pass
+        # Solo muestra símbolos de lo que realmente se ve en la ventana del mapa.
+        try:
+            legend.setLegendFilterByMapEnabled(True)
         except Exception:
             pass
         try:
-            legend.setStyleFont(QgsLegendStyle.Title, QFont("Arial", 8, QFont.Bold))
-            legend.setStyleFont(QgsLegendStyle.SymbolLabel, QFont("Arial", 7))
-            legend.setSymbolHeight(2.5)
-            legend.setSymbolWidth(4)
+            legend.setStyleFont(QgsLegendStyle.Title, QFont("Arial", 7, QFont.Bold))
+            legend.setStyleFont(QgsLegendStyle.SymbolLabel, QFont("Arial", 6))
+            legend.setStyleFont(QgsLegendStyle.Subgroup, QFont("Arial", 6))
+            legend.setSymbolHeight(2.0)
+            legend.setSymbolWidth(3.0)
         except Exception:
             pass
         try:
             legend.setBackgroundEnabled(True)
-            legend.setBackgroundColor(QColor(255, 255, 255, 220))
+            legend.setBackgroundColor(QColor(255, 255, 255, 210))
             legend.setFrameEnabled(True)
         except Exception:
             pass
-        legend.attemptMove(QgsLayoutPoint(15, 10, QgsUnitTypes.LayoutMillimeters))
+        # Ancla la esquina inferior derecha de la leyenda cerca de la del mapa.
+        try:
+            legend.setResizeToContents(True)
+            legend.setReferencePoint(QgsLayoutItem.LowerRight)
+        except Exception:
+            pass
+        legend.attemptMove(QgsLayoutPoint(165, 106, QgsUnitTypes.LayoutMillimeters))
         layout.addLayoutItem(legend)
     except Exception:
         pass

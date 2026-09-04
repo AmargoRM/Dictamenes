@@ -19,7 +19,9 @@ Plugin de QGIS para generar dictámenes de cuerpo de agua (Dirección de Agua, C
 - Etiqueta de puntos igual al Cuadro 1 ("Fuente N - Rol (Punto X)")
 - Escala del mapa en números cerrados, cubriendo siempre todos los puntos
 - Selección de capas del proyecto para incluir en el mapa, con edición de simbología/etiquetas
-- Leyenda automática de las capas activas en el mapa
+- "Generar Word" hace todo el flujo: elegir carpeta → análisis en segundo plano (barra de avance) → aviso de listo
+- Leyenda del mapa acotada (esquina inferior derecha), solo de las capas elegidas y visibles en la vista, con control para encender/apagar puntos y red hídrica
+- Buscador de capas del proyecto (por defecto lista las visibles)
 - Corrección de orientación (EXIF) de las fotos para que no salgan rotadas
 
 ## Instalación
