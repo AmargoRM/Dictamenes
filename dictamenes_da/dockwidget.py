@@ -188,6 +188,7 @@ class SourceCard(QGroupBox):
         super().__init__(f"Fuente {index}", parent)
         self.index = index
         self.description_checks = []
+        self.imagen_path = ""
         self._build()
 
     def _build(self):
@@ -250,6 +251,23 @@ class SourceCard(QGroupBox):
         root.addWidget(QLabel("Observaciones adicionales"))
         root.addWidget(self.observaciones)
 
+        # Imagen del cuerpo de agua (Figura 2), se inserta en el Word por fuente.
+        img_box = QGroupBox("Imagen del cuerpo de agua (Figura 2)")
+        img_layout = QVBoxLayout(img_box)
+        img_layout.setContentsMargins(8, 8, 8, 8)
+        img_buttons = QHBoxLayout()
+        self.btn_pick_image = QPushButton("Subir imagen")
+        self.btn_clear_image = QPushButton("Quitar")
+        img_buttons.addWidget(self.btn_pick_image, 1)
+        img_buttons.addWidget(self.btn_clear_image, 0)
+        img_layout.addLayout(img_buttons)
+        self.imagen_label = QLabel("Sin imagen seleccionada.")
+        self.imagen_label.setWordWrap(True)
+        img_layout.addWidget(self.imagen_label)
+        root.addWidget(img_box)
+        self.btn_pick_image.clicked.connect(self._pick_image)
+        self.btn_clear_image.clicked.connect(self._clear_image)
+
         self.btn_capture_start.clicked.connect(
             lambda: self.capture_requested.emit(self.start_x, self.start_y, f"Fuente {self.index} - Inicio")
         )
@@ -300,6 +318,25 @@ class SourceCard(QGroupBox):
             self.desc_layout.addWidget(cb)
             self.description_checks.append(cb)
 
+    def _pick_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar imagen del cuerpo de agua", "",
+            "Imágenes (*.png *.jpg *.jpeg)"
+        )
+        if path:
+            self.imagen_path = path
+            self._update_image_label()
+
+    def _clear_image(self):
+        self.imagen_path = ""
+        self._update_image_label()
+
+    def _update_image_label(self):
+        if self.imagen_path:
+            self.imagen_label.setText("Imagen: " + os.path.basename(self.imagen_path))
+        else:
+            self.imagen_label.setText("Sin imagen seleccionada.")
+
     def values(self):
         return {
             "numero_fuente": self.numero.text().strip(),
@@ -322,6 +359,7 @@ class SourceCard(QGroupBox):
                 if hasattr(cb, "isChecked") and cb.isChecked()
             ],
             "observaciones": self.observaciones.toPlainText().strip(),
+            "imagen_path": self.imagen_path,
         }
 
     def restore(self, v: dict):
@@ -346,6 +384,8 @@ class SourceCard(QGroupBox):
         self.end_x.setText(v.get("end_x", ""))
         self.end_y.setText(v.get("end_y", ""))
         self.observaciones.setPlainText(v.get("observaciones", ""))
+        self.imagen_path = v.get("imagen_path", "") or ""
+        self._update_image_label()
         # Restaurar checkboxes después de que _refresh_descriptions los reconstruyó
         from qgis.PyQt.QtWidgets import QCheckBox
         selected = set(v.get("descripciones", []))
@@ -463,13 +503,14 @@ class AnalysisTask(QgsTask):
 
 
 class GenerateTask(QgsTask):
-    def __init__(self, widget, plugin_dir: str, snapshot: dict, directory: str, analyzed_data=None):
+    def __init__(self, widget, plugin_dir: str, snapshot: dict, directory: str, analyzed_data=None, mapa_png=""):
         super().__init__("Dictámenes-DA: generar Word", QgsTask.CanCancel)
         self.widget = widget
         self.plugin_dir = plugin_dir
         self.snapshot = snapshot
         self.directory = directory
         self.analyzed_data = analyzed_data
+        self.mapa_png = mapa_png
         self.output_path = ""
         self.error_text = ""
 
@@ -480,6 +521,8 @@ class GenerateTask(QgsTask):
             else:
                 manager = EmbeddedLayerManager(self.plugin_dir)
                 data = build_data_from_snapshot(self.snapshot, manager, do_spatial=True)
+            if self.mapa_png:
+                data["mapa_png"] = self.mapa_png
             self.output_path = write_docx(data, self.directory, self.plugin_dir)
             return True
         except Exception:
@@ -698,7 +741,9 @@ class DictamenesDADockWidget(QDockWidget):
             if canvas_crs != dst:
                 tr = QgsCoordinateTransform(canvas_crs, dst, QgsProject.instance())
                 point = tr.transform(point)
-            decimals = 7 if self.input_crs.currentData() == "EPSG:4326" else 3
+            # Coordenadas sin decimales (números enteros). En WGS84 (grados) se
+            # mantienen decimales porque sin ellos el punto sería inservible.
+            decimals = 6 if self.input_crs.currentData() == "EPSG:4326" else 0
             x_widget.setText(f"{point.x():.{decimals}f}")
             y_widget.setText(f"{point.y():.{decimals}f}")
             self._message(f"Coordenada capturada para {label}: {point.x():.{decimals}f}, {point.y():.{decimals}f}")
@@ -777,6 +822,30 @@ class DictamenesDADockWidget(QDockWidget):
                 lines.append("Advertencia: " + src["warning"])
         self._message("\n".join(lines))
 
+    def _build_reference_map(self, snapshot) -> str:
+        """Genera el PNG del mapa de referencia en el hilo principal. Devuelve la ruta o ''."""
+        import tempfile
+        from qgis.PyQt.QtWidgets import QApplication
+        try:
+            from .map_builder import build_reference_map
+        except Exception as exc:
+            self._message("No se pudo cargar el generador de mapa: " + str(exc))
+            return ""
+        fd, mapa_png = tempfile.mkstemp(prefix="dictamen_mapa_", suffix=".png")
+        os.close(fd)
+        self._message("Generando mapa de referencia (requiere internet, QGIS puede congelarse unos segundos)...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            build_reference_map(self.iface, self.plugin_dir, snapshot, mapa_png)
+            self._message("Mapa de referencia generado.")
+            return mapa_png
+        except Exception as exc:
+            self._message("No se pudo generar el mapa (se continúa sin él): " + str(exc))
+            return ""
+        finally:
+            QApplication.restoreOverrideCursor()
+
     def generate_docx(self):
         if not self.profesional.text().strip():
             QMessageBox.warning(self, "Dato requerido", "Debe indicar el profesional responsable antes de generar el Word.")
@@ -787,7 +856,8 @@ class DictamenesDADockWidget(QDockWidget):
         directory = QFileDialog.getExistingDirectory(self, "Carpeta para guardar el dictamen")
         if not directory:
             return
-        task = GenerateTask(self, self.plugin_dir, snapshot, directory, analyzed_data=cached_data)
+        mapa_png = self._build_reference_map(snapshot)
+        task = GenerateTask(self, self.plugin_dir, snapshot, directory, analyzed_data=cached_data, mapa_png=mapa_png)
         self.active_tasks.append(task)
         self.btn_generate.setEnabled(False)
         if cached_data:

@@ -10,6 +10,9 @@ Plugin de QGIS para generar dictámenes de cuerpo de agua (Dirección de Agua, C
 - Generación de documento Word sobre el machote oficial DA-UHSAN
 - Soporte para múltiples fuentes dictaminadas por expediente
 - **Guardar/Cargar formulario como JSON** para retomar dictámenes en progreso
+- **Subir imagen por fuente**: se inserta automáticamente en "Figura 2. Cuerpo de agua en análisis"
+- **Mapa de referencia automático** (Figura 1): fondo Google Híbrido, cuadrícula CRTM05 con marcas externas, escala automática, media página
+- Captura de coordenadas sin decimales (números enteros)
 
 ## Instalación
 

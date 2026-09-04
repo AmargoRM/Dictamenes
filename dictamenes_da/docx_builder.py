@@ -14,6 +14,12 @@ from datetime import datetime
 from xml.dom import minidom
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PIC_NS = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+REL_IMAGE_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+EMU_PER_CM = 360000
 XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n'
 
 # --- Fuente oficial del dictamen -------------------------------------------
@@ -697,8 +703,9 @@ def normalize_coord_points(points):
 
 
 def _fmt2(v) -> str:
+    # Coordenadas sin decimales (números enteros), tanto CRTM05 como Lambert.
     try:
-        return f"{float(v):.2f}"
+        return f"{float(v):.0f}"
     except Exception:
         return ""
 
@@ -1009,6 +1016,8 @@ def apply_substitutions(xml_bytes: bytes, fv: dict, part_path: str) -> str:
 
     fill_epoca_periodo(idx, first.get("epoca_zona") or fv.get("epoca_zona"))
 
+    insert_document_images(xml_doc, fv)
+
     strip_review_markup_and_highlights(xml_doc)
     normalizar_fuentes(xml_doc)
     return serialize_ooxml(xml_doc)
@@ -1031,6 +1040,200 @@ def clean_review_package(entries: dict) -> None:
         entries["word/settings.xml"] = serialize_ooxml(doc).encode("utf-8")
 
 
+# --- Inserción de imágenes (mapa Figura 1 y fotos Figura 2) -----------------
+
+def _image_size_px(path: str):
+    """Devuelve (ancho, alto) en píxeles de un PNG o JPEG sin librerías externas."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(24)
+            if len(head) >= 24 and head[:8] == b"\x89PNG\r\n\x1a\n":
+                w = int.from_bytes(head[16:20], "big")
+                h = int.from_bytes(head[20:24], "big")
+                return (w, h)
+            if head[:2] == b"\xff\xd8":  # JPEG
+                fh.seek(2)
+                while True:
+                    marker = fh.read(2)
+                    if len(marker) < 2 or marker[0] != 0xFF:
+                        break
+                    code = marker[1]
+                    if code in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                        fh.read(3)  # length(2) + precision(1)
+                        hh = int.from_bytes(fh.read(2), "big")
+                        ww = int.from_bytes(fh.read(2), "big")
+                        return (ww, hh)
+                    length = int.from_bytes(fh.read(2), "big")
+                    if length < 2:
+                        break
+                    fh.seek(length - 2, 1)
+    except Exception:
+        return None
+    return None
+
+
+def _emu_box(path: str, max_w_cm: float, max_h_cm: float):
+    """Escala la imagen para que entre en la caja (cm) conservando proporción. Devuelve (cx, cy) en EMU."""
+    size = _image_size_px(path)
+    max_w = int(max_w_cm * EMU_PER_CM)
+    max_h = int(max_h_cm * EMU_PER_CM)
+    if not size or size[0] <= 0 or size[1] <= 0:
+        return (max_w, int(max_w * 0.66))
+    w_px, h_px = size
+    ratio = min(max_w / w_px, max_h / h_px)
+    return (max(1, int(w_px * ratio)), max(1, int(h_px * ratio)))
+
+
+def _ext_of(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    if ext in ("jpg", "jpeg"):
+        return "jpeg"
+    return ext or "png"
+
+
+def _ensure_content_type(entries: dict, ext: str) -> None:
+    key = "[Content_Types].xml"
+    if key not in entries:
+        return
+    content_type = "image/jpeg" if ext == "jpeg" else f"image/{ext}"
+    doc = minidom.parseString(entries[key])
+    for d in doc.getElementsByTagName("Default"):
+        if (d.getAttribute("Extension") or "").lower() == ext:
+            return
+    types = doc.getElementsByTagName("Types")
+    if not types:
+        return
+    default = doc.createElement("Default")
+    default.setAttribute("Extension", ext)
+    default.setAttribute("ContentType", content_type)
+    types[0].appendChild(default)
+    entries[key] = serialize_ooxml(doc).encode("utf-8")
+
+
+def _prepare_images(entries: dict, fv: dict, plugin_dir: str) -> None:
+    """Agrega los archivos de imagen al paquete y anota rId/tamaño en fv.
+
+    Escribe en fv['_map_image'] y fv['_source_images'] la info que usará
+    apply_substitutions para insertar los <w:drawing>. No falla la generación
+    completa si una imagen no existe: simplemente se omite.
+    """
+    rels_key = "word/_rels/document.xml.rels"
+    if rels_key not in entries:
+        return
+    rels_doc = minidom.parseString(entries[rels_key])
+    rels_root = rels_doc.getElementsByTagName("Relationships")
+    if not rels_root:
+        return
+    rels_root = rels_root[0]
+
+    existing_ids = {r.getAttribute("Id") for r in rels_doc.getElementsByTagName("Relationship")}
+    media_nums = [0]
+    for name in entries:
+        m = re.match(r"word/media/image(\d+)\.", name)
+        if m:
+            media_nums.append(int(m.group(1)))
+    counter = {"media": max(media_nums), "rid": 0}
+
+    def add_image(path):
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            with open(path, "rb") as fh:
+                blob = fh.read()
+        except Exception:
+            return None
+        ext = _ext_of(path)
+        counter["media"] += 1
+        media_name = f"image{counter['media']}.{ext}"
+        entries[f"word/media/{media_name}"] = blob
+        counter["rid"] += 1
+        rid = f"rIdImg{counter['rid']}"
+        while rid in existing_ids:
+            counter["rid"] += 1
+            rid = f"rIdImg{counter['rid']}"
+        existing_ids.add(rid)
+        rel = rels_doc.createElement("Relationship")
+        rel.setAttribute("Id", rid)
+        rel.setAttribute("Type", REL_IMAGE_TYPE)
+        rel.setAttribute("Target", f"media/{media_name}")
+        rels_root.appendChild(rel)
+        _ensure_content_type(entries, ext)
+        return rid
+
+    # Mapa de referencia (Figura 1)
+    map_path = fv.get("mapa_png")
+    map_rid = add_image(map_path)
+    if map_rid:
+        cx, cy = _emu_box(map_path, 16.5, 11.0)
+        fv["_map_image"] = {"rid": map_rid, "cx": cx, "cy": cy}
+
+    # Fotos por fuente (Figura 2), alineadas con el orden de sources
+    source_images = []
+    for src in fv.get("sources", []):
+        path = src.get("imagen_path")
+        rid = add_image(path)
+        if rid:
+            cx, cy = _emu_box(path, 12.0, 9.0)
+            source_images.append({"rid": rid, "cx": cx, "cy": cy})
+        else:
+            source_images.append(None)
+    fv["_source_images"] = source_images
+
+    entries[rels_key] = serialize_ooxml(rels_doc).encode("utf-8")
+
+
+def _image_paragraph(xml_doc, rid: str, cx: int, cy: int, pid: int, name: str):
+    """Crea un <w:p> centrado con una imagen inline que referencia rId."""
+    frag = (
+        '<w:p xmlns:w="%s" xmlns:wp="%s" xmlns:a="%s" xmlns:pic="%s" xmlns:r="%s">'
+        '<w:pPr><w:jc w:val="center"/></w:pPr>'
+        '<w:r><w:rPr/><w:drawing>'
+        '<wp:inline distT="0" distB="0" distL="0" distR="0">'
+        '<wp:extent cx="%d" cy="%d"/>'
+        '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+        '<wp:docPr id="%d" name="%s"/>'
+        '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>'
+        '<a:graphic><a:graphicData uri="%s">'
+        '<pic:pic><pic:nvPicPr><pic:cNvPr id="%d" name="%s"/><pic:cNvPicPr/></pic:nvPicPr>'
+        '<pic:blipFill><a:blip r:embed="%s"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+        '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="%d" cy="%d"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
+        '</pic:pic></a:graphicData></a:graphic>'
+        '</wp:inline></w:drawing></w:r></w:p>'
+    ) % (W_NS, WP_NS, A_NS, PIC_NS, R_NS, cx, cy, pid, name, PIC_NS, pid, name, rid, cx, cy)
+    parsed = minidom.parseString(frag)
+    return xml_doc.importNode(parsed.documentElement, True)
+
+
+def _insert_image_before_anchor(xml_doc, anchor_text: str, image_info: dict, pid: int, name: str, occurrence: int = 1) -> bool:
+    if not image_info:
+        return False
+    seen = 0
+    for p in list(xml_doc.getElementsByTagName("w:p")):
+        if anchor_text in paragraph_text(p):
+            seen += 1
+            if seen != occurrence:
+                continue
+            para = _image_paragraph(xml_doc, image_info["rid"], image_info["cx"], image_info["cy"], pid, name)
+            if p.parentNode:
+                p.parentNode.insertBefore(para, p)
+                return True
+    return False
+
+
+def insert_document_images(xml_doc, fv: dict) -> None:
+    """Inserta el mapa (Figura 1) y las fotos por fuente (Figura 2)."""
+    pid = 5000
+    map_info = fv.get("_map_image")
+    if map_info:
+        _insert_image_before_anchor(xml_doc, "Mapa de ubicación de la zona de estudio", map_info, pid, "Mapa de ubicación", 1)
+        pid += 1
+    for occ, info in enumerate(fv.get("_source_images") or [], start=1):
+        if info:
+            _insert_image_before_anchor(xml_doc, "Cuerpo de agua en análisis", info, pid, f"Cuerpo de agua fuente {occ}", occ)
+            pid += 1
+
+
 def write_docx(data: dict, output_dir: str, plugin_dir: str) -> str:
     os.makedirs(output_dir, exist_ok=True)
     template = _template_path(plugin_dir)
@@ -1039,6 +1242,9 @@ def write_docx(data: dict, output_dir: str, plugin_dir: str) -> str:
     out_path = os.path.join(output_dir, _filename(data))
     with zipfile.ZipFile(template, "r") as zin:
         entries = {name: zin.read(name) for name in zin.namelist()}
+
+    # Prepara imágenes (mapa + fotos) antes de sustituir el documento principal.
+    _prepare_images(entries, data, plugin_dir)
 
     for path in ("word/document.xml", "word/header1.xml", "word/footer1.xml"):
         if path not in entries:
