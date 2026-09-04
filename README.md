@@ -15,7 +15,12 @@ Plugin de QGIS para generar dictámenes de cuerpo de agua (Dirección de Agua, C
 - Simbología por tipo: nacientes/puntuales círculo azul; ríos/quebradas cruz (inicio verde, final verde oscuro); etiqueta a la izquierda
 - Captura de coordenadas sin decimales (números enteros), con marcado en vivo sobre el mapa
 - Botón para generar una capa temporal de puntos con nombre, tipo y número
-- Capa de red hídrica simplificada incluida (`Red.hidrica.min.geojson`)
+- Capa de red hídrica simplificada incluida (`Red.hidrica.min.geojson`), etiquetada sobre la línea en azul e itálica
+- Etiqueta de puntos igual al Cuadro 1 ("Fuente N - Rol (Punto X)")
+- Escala del mapa en números cerrados, cubriendo siempre todos los puntos
+- Selección de capas del proyecto para incluir en el mapa, con edición de simbología/etiquetas
+- Leyenda automática de las capas activas en el mapa
+- Corrección de orientación (EXIF) de las fotos para que no salgan rotadas
 
 ## Instalación
 

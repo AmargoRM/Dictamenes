@@ -19,6 +19,8 @@ from qgis.PyQt.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -503,7 +505,7 @@ class AnalysisTask(QgsTask):
 
 
 class GenerateTask(QgsTask):
-    def __init__(self, widget, plugin_dir: str, snapshot: dict, directory: str, analyzed_data=None, mapa_png=""):
+    def __init__(self, widget, plugin_dir: str, snapshot: dict, directory: str, analyzed_data=None, mapa_png="", norm_images=None):
         super().__init__("Dictámenes-DA: generar Word", QgsTask.CanCancel)
         self.widget = widget
         self.plugin_dir = plugin_dir
@@ -511,6 +513,7 @@ class GenerateTask(QgsTask):
         self.directory = directory
         self.analyzed_data = analyzed_data
         self.mapa_png = mapa_png
+        self.norm_images = norm_images or []
         self.output_path = ""
         self.error_text = ""
 
@@ -523,6 +526,10 @@ class GenerateTask(QgsTask):
                 data = build_data_from_snapshot(self.snapshot, manager, do_spatial=True)
             if self.mapa_png:
                 data["mapa_png"] = self.mapa_png
+            # Aplica las fotos reorientadas (por si se usó el análisis en caché).
+            for i, path in enumerate(self.norm_images):
+                if path and i < len(data.get("sources", [])):
+                    data["sources"][i]["imagen_path"] = path
             self.output_path = write_docx(data, self.directory, self.plugin_dir)
             return True
         except Exception:
@@ -631,6 +638,21 @@ class DictamenesDADockWidget(QDockWidget):
         form.addRow("Profesional", self.profesional)
         layout.addWidget(admin)
 
+        maplayers = QGroupBox("Capas extra para el mapa")
+        ml = QVBoxLayout(maplayers)
+        ml.setContentsMargins(8, 8, 8, 8)
+        ml.addWidget(QLabel("Marque las capas del proyecto que quiere incluir en el mapa:"))
+        self.extra_layers_list = QListWidget()
+        self.extra_layers_list.setMinimumHeight(90)
+        ml.addWidget(self.extra_layers_list)
+        ml_btns = QHBoxLayout()
+        self.btn_refresh_layers = QPushButton("Refrescar capas")
+        self.btn_edit_symbology = QPushButton("Editar simbología/etiquetas…")
+        ml_btns.addWidget(self.btn_refresh_layers)
+        ml_btns.addWidget(self.btn_edit_symbology)
+        ml.addLayout(ml_btns)
+        layout.addWidget(maplayers)
+
         actions = QGridLayout()
         self.btn_load_layers = QPushButton("Cargar capas")
         self.btn_analyze = QPushButton("Analizar")
@@ -672,7 +694,10 @@ class DictamenesDADockWidget(QDockWidget):
         self.btn_save_form.clicked.connect(self.save_form)
         self.btn_load_form.clicked.connect(self.load_form)
         self.btn_points_layer.clicked.connect(self.generate_points_layer)
+        self.btn_refresh_layers.clicked.connect(self._refresh_layer_list)
+        self.btn_edit_symbology.clicked.connect(self._edit_layer_symbology)
         self._render_sources(1)
+        self._refresh_layer_list()
 
     def _render_sources(self, count):
         old_values = {}
@@ -867,6 +892,76 @@ class DictamenesDADockWidget(QDockWidget):
             self._message("Error al generar la capa de puntos: " + str(exc))
             self._message(traceback.format_exc())
 
+    def _refresh_layer_list(self):
+        previously = set(self._selected_extra_layer_ids())
+        self.extra_layers_list.clear()
+        for lyr in QgsProject.instance().mapLayers().values():
+            item = QListWidgetItem(lyr.name())
+            item.setData(Qt.UserRole, lyr.id())
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if lyr.id() in previously else Qt.Unchecked)
+            self.extra_layers_list.addItem(item)
+
+    def _selected_extra_layer_ids(self):
+        ids = []
+        if not hasattr(self, "extra_layers_list"):
+            return ids
+        for i in range(self.extra_layers_list.count()):
+            item = self.extra_layers_list.item(i)
+            if item.checkState() == Qt.Checked:
+                ids.append(item.data(Qt.UserRole))
+        return ids
+
+    def _edit_layer_symbology(self):
+        item = self.extra_layers_list.currentItem()
+        if not item:
+            self._message("Seleccione una capa de la lista (un clic sobre su nombre) para editar su simbología.")
+            return
+        layer = QgsProject.instance().mapLayer(item.data(Qt.UserRole))
+        if layer is None:
+            self._message("La capa ya no está en el proyecto. Use 'Refrescar capas'.")
+            return
+        try:
+            self.iface.showLayerProperties(layer)
+        except Exception as exc:
+            self._message("No se pudo abrir las propiedades de la capa: " + str(exc))
+
+    def _normalize_source_images(self, snapshot):
+        """Corrige la orientación EXIF de las fotos (Word no la aplica) 'horneándola'.
+
+        Devuelve una lista alineada con las fuentes, con la ruta a usar por cada una.
+        """
+        from qgis.PyQt.QtGui import QImageReader
+        import tempfile
+        result = []
+        for src in snapshot.get("sources", []):
+            path = (src.get("imagen_path") or "").strip()
+            if not path or not os.path.exists(path):
+                result.append("")
+                continue
+            try:
+                reader = QImageReader(path)
+                reader.setAutoTransform(True)
+                if not int(reader.transformation()):
+                    result.append(path)  # sin rotación EXIF: usar original tal cual
+                    continue
+                img = reader.read()
+                if img.isNull():
+                    result.append(path)
+                    continue
+                ext = os.path.splitext(path)[1].lower()
+                fmt = "JPEG" if ext in (".jpg", ".jpeg") else "PNG"
+                fd, outp = tempfile.mkstemp(prefix="dictamen_img_", suffix=ext or ".jpg")
+                os.close(fd)
+                img.save(outp, fmt, 95)
+                src["imagen_path"] = outp
+                result.append(outp)
+                self._message(f"Imagen '{os.path.basename(path)}' reorientada (EXIF) para que no salga rotada.")
+            except Exception as exc:
+                self._message("No se pudo reorientar una imagen: " + str(exc))
+                result.append(path)
+        return result
+
     def _build_reference_map(self, snapshot) -> str:
         """Genera el PNG del mapa de referencia en el hilo principal. Devuelve la ruta o ''."""
         import tempfile
@@ -882,7 +977,8 @@ class DictamenesDADockWidget(QDockWidget):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         QApplication.processEvents()
         try:
-            build_reference_map(self.iface, self.plugin_dir, snapshot, mapa_png)
+            extra = self._selected_extra_layer_ids()
+            build_reference_map(self.iface, self.plugin_dir, snapshot, mapa_png, extra_layer_ids=extra)
             self._message("Mapa de referencia generado.")
             return mapa_png
         except Exception as exc:
@@ -901,8 +997,10 @@ class DictamenesDADockWidget(QDockWidget):
         directory = QFileDialog.getExistingDirectory(self, "Carpeta para guardar el dictamen")
         if not directory:
             return
+        norm_images = self._normalize_source_images(snapshot)
         mapa_png = self._build_reference_map(snapshot)
-        task = GenerateTask(self, self.plugin_dir, snapshot, directory, analyzed_data=cached_data, mapa_png=mapa_png)
+        task = GenerateTask(self, self.plugin_dir, snapshot, directory, analyzed_data=cached_data,
+                            mapa_png=mapa_png, norm_images=norm_images)
         self.active_tasks.append(task)
         self.btn_generate.setEnabled(False)
         if cached_data:

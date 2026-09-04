@@ -94,16 +94,20 @@ def collect_map_points(snapshot: dict):
         num = (src.get("numero_fuente") or str(idx)).strip()
         tipo = (src.get("tipo_fuente") or "").strip()
         nombre = (src.get("nombre_fuente") or "").strip()
-        etq = nombre or (tipo if tipo else f"Fuente {num}")
-        for kx, ky, rol in (
-            ("start_x", "start_y", "Inicio"),
-            ("end_x", "end_y", "Final"),
+        for kx, ky, kn, rol in (
+            ("start_x", "start_y", "start_number", "Inicio"),
+            ("end_x", "end_y", "end_number", "Final"),
         ):
             if not str(src.get(kx, "")).strip() or not str(src.get(ky, "")).strip():
                 continue
             pt = to_crtm(src.get(kx), src.get(ky))
             if pt is None:
                 continue
+            pnum = (src.get(kn) or "").strip()
+            # Etiqueta igual al Cuadro 1: "Fuente N - Rol (Punto X)".
+            etq = f"Fuente {num} - {rol}"
+            if pnum:
+                etq += f" (Punto {pnum})"
             points.append({
                 "x": pt.x(), "y": pt.y(), "nombre": nombre, "tipo": tipo,
                 "numero": num, "rol": rol, "etq": etq,
@@ -114,10 +118,12 @@ def collect_map_points(snapshot: dict):
         pt = to_crtm(cp.get("x"), cp.get("y"))
         if pt is None:
             continue
-        etq = (cp.get("label") or f"Control {row}").strip()
+        base = (cp.get("label") or f"Control {row}").strip()
+        pnum = (cp.get("number") or "").strip()
+        etq = base + (f" (Punto {pnum})" if pnum else "")
         points.append({
-            "x": pt.x(), "y": pt.y(), "nombre": etq, "tipo": "Control",
-            "numero": (cp.get("number") or "").strip(), "rol": "Control", "etq": etq,
+            "x": pt.x(), "y": pt.y(), "nombre": base, "tipo": "Control",
+            "numero": pnum, "rol": "Control", "etq": etq,
         })
     return points
 
@@ -237,7 +243,41 @@ def _load_river(plugin_dir: str):
         layer.renderer().setSymbol(symbol)
     except Exception:
         pass
+    _apply_river_labeling(layer)
     return layer
+
+
+def _apply_river_labeling(layer):
+    """Etiqueta el río con NOMBRE, sobre la línea, azul e itálica."""
+    try:
+        pal = QgsPalLayerSettings()
+        pal.fieldName = "NOMBRE"
+        pal.enabled = True
+        tf = QgsTextFormat()
+        tf.setSize(7)
+        tf.setColor(QColor(20, 70, 200))
+        font = QFont("Arial")
+        font.setItalic(True)
+        tf.setFont(font)
+        pal.setFormat(tf)
+        try:
+            pal.placement = QgsPalLayerSettings.Line
+            pal.placementFlags = (
+                QgsPalLayerSettings.OnLine | QgsPalLayerSettings.MapOrientation
+            )
+        except Exception:
+            try:
+                pal.placement = QgsPalLayerSettings.Curved
+            except Exception:
+                pass
+        try:
+            pal.setFormat(tf)
+        except Exception:
+            pass
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(pal))
+        layer.setLabelsEnabled(True)
+    except Exception:
+        pass
 
 
 def _extent(points):
@@ -255,7 +295,21 @@ def _extent(points):
     return QgsRectangle(cx - half, cy - half, cx + half, cy + half)
 
 
-def build_reference_map(iface, plugin_dir: str, snapshot: dict, out_png_path: str) -> str:
+_NICE_SCALES = [500, 1000, 2000, 2500, 5000, 7500, 10000, 15000, 20000,
+                25000, 50000, 75000, 100000, 200000, 500000]
+
+
+def _round_scale_up(scale: float) -> float:
+    """Devuelve la escala 'cerrada' inmediata igual o mayor que la calculada."""
+    for s in _NICE_SCALES:
+        if s >= scale:
+            return float(s)
+    import math
+    return float(math.ceil(scale / 100000.0) * 100000)
+
+
+def build_reference_map(iface, plugin_dir: str, snapshot: dict, out_png_path: str,
+                        extra_layer_ids=None) -> str:
     points = collect_map_points(snapshot)
     if not points:
         raise ValueError("No hay coordenadas para dibujar el mapa.")
@@ -266,6 +320,13 @@ def build_reference_map(iface, plugin_dir: str, snapshot: dict, out_png_path: st
         raise RuntimeError("No se pudo cargar el fondo Google Híbrido (¿hay internet?).")
     pts_layer = make_points_layer(points)
     river = _load_river(plugin_dir)
+
+    # Capas extra elegidas por el usuario (ya existen en el proyecto: no se quitan).
+    extra_layers = []
+    for lid in (extra_layer_ids or []):
+        lyr = project.mapLayer(lid)
+        if lyr is not None:
+            extra_layers.append(lyr)
 
     added = []
     project.addMapLayer(base, False)
@@ -285,19 +346,26 @@ def build_reference_map(iface, plugin_dir: str, snapshot: dict, out_png_path: st
         map_item.attemptMove(QgsLayoutPoint(13, 8, QgsUnitTypes.LayoutMillimeters))
         map_item.attemptResize(QgsLayoutSize(154, 100, QgsUnitTypes.LayoutMillimeters))
         map_item.setCrs(QgsCoordinateReferenceSystem(CRTM05))
-        stack = [pts_layer]
+        stack = [pts_layer] + extra_layers
         if river is not None:
             stack.append(river)
         stack.append(base)
         map_item.setLayers(stack)
-        extent = _extent(points)
-        map_item.setExtent(extent)
+        map_item.setExtent(_extent(points))
+        # Escala en número cerrado; al redondear hacia arriba la ventana crece,
+        # así que siempre sigue cubriendo todos los puntos.
+        try:
+            map_item.refresh()
+            map_item.setScale(_round_scale_up(map_item.scale()))
+        except Exception:
+            pass
         map_item.setFrameEnabled(True)
         layout.addLayoutItem(map_item)
 
-        _configure_grid(map_item, extent)
+        _configure_grid(map_item, map_item.extent())
         _add_scalebar(layout, map_item)
         _add_north(layout)
+        _add_legend(layout, map_item)
 
         exporter = QgsLayoutExporter(layout)
         settings = QgsLayoutExporter.ImageExportSettings()
@@ -309,6 +377,36 @@ def build_reference_map(iface, plugin_dir: str, snapshot: dict, out_png_path: st
     finally:
         for lid in added:
             project.removeMapLayer(lid)
+
+
+def _add_legend(layout, map_item):
+    """Pequeña leyenda con la simbología de las capas activas del mapa."""
+    try:
+        from qgis.core import QgsLayoutItemLegend, QgsLegendStyle
+        legend = QgsLayoutItemLegend(layout)
+        legend.setLinkedMap(map_item)
+        legend.setTitle("Simbología")
+        try:
+            legend.setAutoUpdateModel(True)
+        except Exception:
+            pass
+        try:
+            legend.setStyleFont(QgsLegendStyle.Title, QFont("Arial", 8, QFont.Bold))
+            legend.setStyleFont(QgsLegendStyle.SymbolLabel, QFont("Arial", 7))
+            legend.setSymbolHeight(2.5)
+            legend.setSymbolWidth(4)
+        except Exception:
+            pass
+        try:
+            legend.setBackgroundEnabled(True)
+            legend.setBackgroundColor(QColor(255, 255, 255, 220))
+            legend.setFrameEnabled(True)
+        except Exception:
+            pass
+        legend.attemptMove(QgsLayoutPoint(15, 10, QgsUnitTypes.LayoutMillimeters))
+        layout.addLayoutItem(legend)
+    except Exception:
+        pass
 
 
 def _configure_grid(map_item, extent):
