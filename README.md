@@ -22,6 +22,8 @@ Plugin de QGIS para generar dictámenes de cuerpo de agua (Dirección de Agua, C
 - "Generar Word" hace todo el flujo: elegir carpeta → análisis en segundo plano (barra de avance) → aviso de listo
 - Leyenda del mapa acotada (esquina inferior derecha), solo de las capas elegidas y visibles en la vista, con control para encender/apagar puntos y red hídrica
 - Buscador de capas del proyecto (por defecto lista las visibles)
+- Recuadro temporal para marcar manualmente la zona del mapa (se borra al generar el Word)
+- Botón "Limpiar" deja todo el formulario y los datos consultados en blanco, listo para un nuevo informe
 - Corrección de orientación (EXIF) de las fotos para que no salgan rotadas
 
 ## Instalación

@@ -309,7 +309,7 @@ def _round_scale_up(scale: float) -> float:
 
 
 def build_reference_map(iface, plugin_dir: str, snapshot: dict, out_png_path: str,
-                        extra_layer_ids=None, legend_opts=None) -> str:
+                        extra_layer_ids=None, legend_opts=None, manual_extent=None) -> str:
     points = collect_map_points(snapshot)
     if not points:
         raise ValueError("No hay coordenadas para dibujar el mapa.")
@@ -351,7 +351,8 @@ def build_reference_map(iface, plugin_dir: str, snapshot: dict, out_png_path: st
             stack.append(river)
         stack.append(base)
         map_item.setLayers(stack)
-        map_item.setExtent(_extent(points))
+        # Zona manual (recuadro dibujado) o ventana automática que cubre los puntos.
+        map_item.setExtent(manual_extent if manual_extent is not None else _extent(points))
         # Escala en número cerrado; al redondear hacia arriba la ventana crece,
         # así que siempre sigue cubriendo todos los puntos.
         try:

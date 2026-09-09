@@ -538,6 +538,10 @@ class DictamenesDADockWidget(QDockWidget):
         self.last_analyzed_data = None
         self._restore_source_data = {}
         self._capture_layer_id = None
+        self._suppress_restore = False
+        self._map_zone_tool = None
+        self._map_zone_extent = None  # QgsRectangle en CRTM05 (zona manual del mapa)
+        self._prev_tool_zone = None
         self._build_ui()
 
     def _build_ui(self):
@@ -648,6 +652,17 @@ class DictamenesDADockWidget(QDockWidget):
         ml.addWidget(self.chk_legend)
         ml.addWidget(self.chk_legend_points)
         ml.addWidget(self.chk_legend_river)
+
+        # Zona del mapa: recuadro visible temporal.
+        zone_btns = QHBoxLayout()
+        self.btn_draw_zone = QPushButton("Dibujar zona del mapa")
+        self.btn_clear_zone = QPushButton("Quitar zona")
+        zone_btns.addWidget(self.btn_draw_zone)
+        zone_btns.addWidget(self.btn_clear_zone)
+        ml.addLayout(zone_btns)
+        self.zone_label = QLabel("Zona del mapa: automática (cubre todos los puntos).")
+        self.zone_label.setWordWrap(True)
+        ml.addWidget(self.zone_label)
         layout.addWidget(maplayers)
 
         actions = QGridLayout()
@@ -688,6 +703,8 @@ class DictamenesDADockWidget(QDockWidget):
         self.btn_refresh_layers.clicked.connect(self._refresh_layer_list)
         self.btn_edit_symbology.clicked.connect(self._edit_layer_symbology)
         self.layer_search.textChanged.connect(self._refresh_layer_list)
+        self.btn_draw_zone.clicked.connect(self._draw_map_zone)
+        self.btn_clear_zone.clicked.connect(self._clear_map_zone)
         self._render_sources(1)
         self._refresh_layer_list()
 
@@ -701,9 +718,13 @@ class DictamenesDADockWidget(QDockWidget):
                 old_values[idx] = widget.values()
                 widget.setParent(None)
                 widget.deleteLater()
-        # _restore_source_data (de load_form) tiene prioridad sobre los valores actuales
-        restore_data = dict(old_values)
-        restore_data.update(self._restore_source_data)
+        # Al limpiar el formulario NO se conservan los valores anteriores.
+        if self._suppress_restore:
+            restore_data = {}
+        else:
+            # _restore_source_data (de load_form) tiene prioridad sobre los valores actuales
+            restore_data = dict(old_values)
+            restore_data.update(self._restore_source_data)
         self.source_cards = []
         for index in range(1, int(count) + 1):
             card = SourceCard(index)
@@ -887,6 +908,44 @@ class DictamenesDADockWidget(QDockWidget):
             "river": self.chk_legend_river.isChecked() if hasattr(self, "chk_legend_river") else True,
         }
 
+    def _draw_map_zone(self):
+        from .map_tool import RectangleMapTool
+        canvas = self.iface.mapCanvas()
+        if self._map_zone_tool is None:
+            self._map_zone_tool = RectangleMapTool(canvas)
+            self._map_zone_tool.rectangle_created.connect(self._on_zone_created)
+        self._prev_tool_zone = canvas.mapTool()
+        canvas.setMapTool(self._map_zone_tool)
+        self._message("Dibuje un rectángulo en el mapa (arrastre con el mouse) para marcar la zona del mapa.")
+
+    def _on_zone_created(self, rect_canvas):
+        from qgis.core import QgsRectangle
+        try:
+            canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+            dst = QgsCoordinateReferenceSystem("EPSG:5367")
+            if canvas_crs != dst:
+                tr = QgsCoordinateTransform(canvas_crs, dst, QgsProject.instance())
+                pmin = tr.transform(QgsPointXY(rect_canvas.xMinimum(), rect_canvas.yMinimum()))
+                pmax = tr.transform(QgsPointXY(rect_canvas.xMaximum(), rect_canvas.yMaximum()))
+                self._map_zone_extent = QgsRectangle(pmin, pmax)
+            else:
+                self._map_zone_extent = rect_canvas
+            self.zone_label.setText("Zona del mapa: marcada (recuadro rojo). Se borra al generar el Word.")
+            self._message("Zona del mapa marcada. Se usará ese recuadro para generar el mapa.")
+        except Exception as exc:
+            self._message("No se pudo fijar la zona del mapa: " + str(exc))
+        finally:
+            canvas = self.iface.mapCanvas()
+            if self._prev_tool_zone is not None:
+                canvas.setMapTool(self._prev_tool_zone)
+
+    def _clear_map_zone(self):
+        self._map_zone_extent = None
+        if self._map_zone_tool is not None:
+            self._map_zone_tool.clear()
+        if hasattr(self, "zone_label"):
+            self.zone_label.setText("Zona del mapa: automática (cubre todos los puntos).")
+
     def _selected_extra_layer_ids(self):
         ids = []
         if not hasattr(self, "extra_layers_list"):
@@ -964,7 +1023,8 @@ class DictamenesDADockWidget(QDockWidget):
         try:
             extra = self._selected_extra_layer_ids()
             build_reference_map(self.iface, self.plugin_dir, snapshot, mapa_png,
-                                extra_layer_ids=extra, legend_opts=self._legend_options())
+                                extra_layer_ids=extra, legend_opts=self._legend_options(),
+                                manual_extent=self._map_zone_extent)
             self._message("Mapa de referencia generado.")
             return mapa_png
         except Exception as exc:
@@ -1003,6 +1063,8 @@ class DictamenesDADockWidget(QDockWidget):
             self._message("Error al generar Word:\n" + task.error_text)
             QMessageBox.critical(self, "Error", task.error_text.splitlines()[-1] if task.error_text else "Error desconocido")
             return
+        # El recuadro de zona ya cumplió su función: se borra al generar el Word.
+        self._clear_map_zone()
         self._message("Documento generado: " + task.output_path)
         QMessageBox.information(self, "Dictámenes-DA", "Documento generado:\n" + task.output_path)
 
@@ -1057,6 +1119,8 @@ class DictamenesDADockWidget(QDockWidget):
                 self.control_table.setItem(row, col, QTableWidgetItem(raw.get(key, "")))
 
     def clear_form(self):
+        """Deja TODO en blanco y listo para un nuevo informe."""
+        # Datos administrativos.
         for widget in [
             self.oficio, self.solicitante, self.correo, self.id_solicitud,
             self.sitio, self.acompanantes, self.profesional,
@@ -1064,8 +1128,38 @@ class DictamenesDADockWidget(QDockWidget):
             widget.clear()
         for widget in [self.fecha_oficio, self.fecha_inspeccion, self.fecha_evaluacion]:
             widget.clear()
-        self.source_count.setValue(1)
-        self._render_sources(1)
+        self.input_crs.setCurrentIndex(0)
+
+        # Fuentes: reconstruir en blanco (sin conservar valores anteriores).
+        self._restore_source_data = {}
+        self._suppress_restore = True
+        try:
+            self.source_count.setValue(1)
+            self._render_sources(1)
+        finally:
+            self._suppress_restore = False
+
+        # Puntos de control.
         self.control_table.setRowCount(0)
+
+        # Zona del mapa y opciones de leyenda.
+        self._clear_map_zone()
+        for chk in ("chk_legend", "chk_legend_points", "chk_legend_river"):
+            if hasattr(self, chk):
+                getattr(self, chk).setChecked(True)
+        if hasattr(self, "layer_search"):
+            self.layer_search.clear()
+        self._refresh_layer_list()
+
+        # Datos consultados / capa de puntos capturados.
+        self.last_analyzed_data = None
+        self.last_snapshot_repr = ""
+        try:
+            if self._capture_layer_id:
+                QgsProject.instance().removeMapLayer(self._capture_layer_id)
+        except Exception:
+            pass
+        self._capture_layer_id = None
+
         self.messages.clear()
-        self._message("Formulario limpio.")
+        self._message("Formulario y datos en blanco. Listo para un nuevo informe.")
